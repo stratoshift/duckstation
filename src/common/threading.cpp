@@ -5,8 +5,13 @@
 #include "assert.h"
 #include "cocoa_tools.h"
 #include "log.h"
+#include "timer.h"
 
 #include <memory>
+
+#if defined(CPU_ARCH_X86) || defined(CPU_ARCH_X64)
+#include <emmintrin.h>
+#endif
 
 #if !defined(_WIN32) && !defined(__APPLE__)
 #ifndef _GNU_SOURCE
@@ -17,6 +22,10 @@
 #if defined(_WIN32)
 #include "windows_headers.h"
 #include <process.h>
+
+#if defined(CPU_ARCH_ARM64) && defined(_MSC_VER)
+#include <arm64intr.h>
+#endif
 #else
 #include <pthread.h>
 #include <unistd.h>
@@ -105,6 +114,138 @@ void Threading::Timeslice()
   sched_yield();
 #endif
 }
+
+static void MultiPause()
+{
+#if defined(CPU_ARCH_X86) || defined(CPU_ARCH_X64)
+  _mm_pause();
+  _mm_pause();
+  _mm_pause();
+  _mm_pause();
+  _mm_pause();
+  _mm_pause();
+  _mm_pause();
+  _mm_pause();
+#elif defined(CPU_ARCH_ARM64) && defined(_MSC_VER)
+  __isb(_ARM64_BARRIER_SY);
+  __isb(_ARM64_BARRIER_SY);
+  __isb(_ARM64_BARRIER_SY);
+  __isb(_ARM64_BARRIER_SY);
+  __isb(_ARM64_BARRIER_SY);
+  __isb(_ARM64_BARRIER_SY);
+  __isb(_ARM64_BARRIER_SY);
+  __isb(_ARM64_BARRIER_SY);
+#elif defined(CPU_ARCH_ARM64) || defined(CPU_ARCH_ARM32)
+  __asm__ __volatile__("isb");
+  __asm__ __volatile__("isb");
+  __asm__ __volatile__("isb");
+  __asm__ __volatile__("isb");
+  __asm__ __volatile__("isb");
+  __asm__ __volatile__("isb");
+  __asm__ __volatile__("isb");
+  __asm__ __volatile__("isb");
+#elif defined(CPU_ARCH_RISCV64)
+  // Probably wrong... pause is optional :/
+  asm volatile("fence" ::: "memory");
+#else
+#pragma warning("Missing implementation")
+#endif
+}
+
+// Apple uses a lower tick frequency, so we can't use the dynamic loop below.
+#if !defined(_M_ARM64) || defined(__APPLE__) || defined(_WIN32)
+
+static u32 PAUSE_TIME = 0;
+
+static u32 MeasurePauseTime()
+{
+  // GetCPUTicks may have resolution as low as 1us
+  // One call to MultiPause could take anywhere from 20ns (fast Haswell) to 400ns (slow Skylake)
+  // We want a measurement of reasonable resolution, but don't want to take too long
+  // So start at a fairly small number and increase it if it's too fast
+  for (int testcnt = 64; true; testcnt *= 2)
+  {
+    Common::Timer::Value start = Common::Timer::GetCurrentValue();
+    for (int i = 0; i < testcnt; i++)
+    {
+      MultiPause();
+    }
+    Common::Timer::Value time = Common::Timer::GetCurrentValue() - start;
+    if (time > 100)
+    {
+      const double nanos = Common::Timer::ConvertValueToNanoseconds(time);
+      return static_cast<u32>((nanos / testcnt) + 1);
+    }
+  }
+}
+
+NEVER_INLINE static void UpdatePauseTime()
+{
+  Common::Timer::BusyWait(10000000);
+  u32 pause = MeasurePauseTime();
+  // Take a few measurements in case something weird happens during one
+  // (e.g. OS interrupt)
+  for (int i = 0; i < 4; i++)
+    pause = std::min(pause, MeasurePauseTime());
+  PAUSE_TIME = pause;
+  VERBOSE_LOG("MultiPause time: {}ns", pause);
+}
+
+u32 Threading::ShortSpin()
+{
+  u32 inc = PAUSE_TIME;
+  if (inc == 0) [[unlikely]]
+  {
+    UpdatePauseTime();
+    inc = PAUSE_TIME;
+  }
+
+  u32 time = 0;
+  // Sleep for approximately 500ns
+  for (; time < 500; time += inc)
+    MultiPause();
+
+  return time;
+}
+
+#else
+
+// On ARM, we have big/little cores, and who knows which one we'll measure/run on..
+// TODO: Actually verify this code.
+const u32 SHORT_SPIN_TIME_TICKS = static_cast<u32>((Common::Timer::GetFrequency() * 500) / 1000000000);
+
+u32 Threading::ShortSpin()
+{
+  const Common::Timer::Value start = Common::Timer::GetCurrentValue();
+  Common::Timer::Value now = start;
+  while ((now - start) < SHORT_SPIN_TIME_TICKS)
+  {
+    MultiPause();
+    now = Common::Timer::GetCurrentValue();
+  }
+
+  return static_cast<u32>((Common::Timer::GetCurrentValue() * (now - start)) / 1000000000);
+}
+
+#endif
+
+static u32 GetSpinTime()
+{
+  if (char* req = std::getenv("WAIT_SPIN_MICROSECONDS"))
+  {
+    return 1000 * atoi(req);
+  }
+  else
+  {
+#ifndef _M_ARM64
+    return 50 * 1000; // 50us
+#else
+    return 200 * 1000; // 200us
+#endif
+  }
+}
+
+const u32 Threading::SPIN_TIME_NS = GetSpinTime();
 
 Threading::ThreadHandle::ThreadHandle() = default;
 

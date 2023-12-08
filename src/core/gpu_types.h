@@ -5,11 +5,17 @@
 
 #include "types.h"
 
+#include "util/gpu_texture.h"
+
 #include "common/bitfield.h"
 #include "common/bitutils.h"
 #include "common/gsvector.h"
 
 #include <array>
+#include <functional>
+#include <vector>
+
+class StateWrapper;
 
 enum : u32
 {
@@ -223,12 +229,17 @@ union GPUTexturePaletteReg
   ALWAYS_INLINE constexpr u32 GetYBase() const { return static_cast<u32>(y); }
 };
 
-struct GPUTextureWindow
+union GPUTextureWindow
 {
-  u8 and_x;
-  u8 and_y;
-  u8 or_x;
-  u8 or_y;
+  struct
+  {
+    u8 and_x;
+    u8 and_y;
+    u8 or_x;
+    u8 or_y;
+  };
+
+  u32 bits;
 };
 
 ALWAYS_INLINE static constexpr u32 VRAMPageIndex(u32 px, u32 py)
@@ -358,15 +369,99 @@ static constexpr s32 DITHER_MATRIX[DITHER_MATRIX_SIZE][DITHER_MATRIX_SIZE] = {{-
 enum class GPUBackendCommandType : u8
 {
   Wraparound,
-  Sync,
+  AsyncCall,
+  ChangeBackend,
+  UpdateVSync,
+  ClearVRAM,
+  DoState,
+  ClearDisplay,
+  UpdateDisplay,
+  ClearCache,
+  BufferSwapped,
+  FlushRender,
+  UpdateResolutionScale,
+  RenderScreenshotToBuffer,
+  ReadVRAM,
   FillVRAM,
   UpdateVRAM,
   CopyVRAM,
   SetDrawingArea,
   UpdateCLUT,
   DrawPolygon,
+  DrawPrecisePolygon,
   DrawRectangle,
   DrawLine,
+};
+
+struct GPUThreadCommand
+{
+  u32 size;
+  GPUBackendCommandType type;
+};
+
+struct GPUThreadAsyncCallCommand : public GPUThreadCommand
+{
+  std::function<void()> func;
+};
+
+struct GPUThreadRenderScreenshotToBufferCommand : public GPUThreadCommand
+{
+  u32 width;
+  u32 height;
+  u32* out_width;
+  u32* out_height;
+  std::vector<u32>* out_pixels;
+  u32* out_stride;
+  GPUTexture::Format* out_format;
+  bool* out_result;
+  bool postfx;
+};
+
+struct GPUBackendDoStateCommand : public GPUThreadCommand
+{
+  GPUTexture** host_texture;
+  bool is_reading;
+  bool update_display;
+};
+
+struct GPUBackendUpdateDisplayCommand : public GPUThreadCommand
+{
+  u16 display_width;
+  u16 display_height;
+  u16 display_origin_left;
+  u16 display_origin_top;
+  u16 display_vram_left;
+  u16 display_vram_top;
+  u16 display_vram_width;
+  u16 display_vram_height;
+
+  u16 X; // TODO: Can we get rid of this?
+
+  union
+  {
+    u8 bits;
+
+    BitField<u8, bool, 0, 1> interlaced_display_enabled;
+    BitField<u8, u8, 1, 1> interlaced_display_field;
+    BitField<u8, bool, 2, 1> interlaced_display_interleaved;
+    BitField<u8, bool, 3, 1> display_24bit;
+    BitField<u8, bool, 4, 1> display_disabled;
+
+    BitField<u8, bool, 6, 1> allow_present_skip;
+    BitField<u8, bool, 7, 1> present_frame;
+  };
+
+  float display_aspect_ratio;
+
+  u64 present_time;
+};
+
+struct GPUBackendReadVRAMCommand : public GPUThreadCommand
+{
+  u16 x;
+  u16 y;
+  u16 width;
+  u16 height;
 };
 
 union GPUBackendCommandParameters
@@ -394,16 +489,10 @@ union GPUBackendCommandParameters
   }
 };
 
-struct GPUBackendCommand
+// TODO: Merge this into the other structs, saves padding bytes
+struct GPUBackendCommand : public GPUThreadCommand
 {
-  u32 size;
-  GPUBackendCommandType type;
   GPUBackendCommandParameters params;
-};
-
-struct GPUBackendSyncCommand : public GPUBackendCommand
-{
-  bool allow_sleep;
 };
 
 struct GPUBackendFillVRAMCommand : public GPUBackendCommand
@@ -437,7 +526,6 @@ struct GPUBackendCopyVRAMCommand : public GPUBackendCommand
 struct GPUBackendSetDrawingAreaCommand : public GPUBackendCommand
 {
   GPUDrawingArea new_area;
-  s32 new_clamped_area[4];
 };
 
 struct GPUBackendUpdateCLUTCommand : public GPUBackendCommand
@@ -446,8 +534,10 @@ struct GPUBackendUpdateCLUTCommand : public GPUBackendCommand
   bool clut_is_8bit;
 };
 
+// TODO: Pack texpage
 struct GPUBackendDrawCommand : public GPUBackendCommand
 {
+  // TODO: Cut this down
   GPUDrawModeReg draw_mode;
   GPURenderCommand rc;
   GPUTexturePaletteReg palette;
@@ -456,7 +546,7 @@ struct GPUBackendDrawCommand : public GPUBackendCommand
 
 struct GPUBackendDrawPolygonCommand : public GPUBackendDrawCommand
 {
-  u16 num_vertices;
+  u8 num_vertices;
 
   struct Vertex
   {
@@ -477,14 +567,22 @@ struct GPUBackendDrawPolygonCommand : public GPUBackendDrawCommand
       };
       u16 texcoord;
     };
+  };
 
-    ALWAYS_INLINE void Set(s32 x_, s32 y_, u32 color_, u16 texcoord_)
-    {
-      x = x_;
-      y = y_;
-      color = color_;
-      texcoord = texcoord_;
-    }
+  Vertex vertices[0];
+};
+
+struct GPUBackendDrawPrecisePolygonCommand : public GPUBackendDrawCommand
+{
+  u8 num_vertices;
+  bool valid_w;
+
+  struct Vertex
+  {
+    float x, y, w;
+    s32 native_x, native_y;
+    u32 color;
+    u16 texcoord;
   };
 
   Vertex vertices[0];
@@ -492,9 +590,9 @@ struct GPUBackendDrawPolygonCommand : public GPUBackendDrawCommand
 
 struct GPUBackendDrawRectangleCommand : public GPUBackendDrawCommand
 {
-  s32 x, y;
   u16 width, height;
   u16 texcoord;
+  s32 x, y;
   u32 color;
 };
 

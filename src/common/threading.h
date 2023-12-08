@@ -20,8 +20,15 @@ extern u64 GetThreadTicksPerSecond();
 /// Set the name of the current thread
 extern void SetNameOfCurrentThread(const char* name);
 
-// Releases a timeslice to other threads.
+/// Releases a timeslice to other threads.
 extern void Timeslice();
+
+/// Spin for a short period of time (call while spinning waiting for a lock)
+/// Returns the approximate number of ns that passed
+extern u32 ShortSpin();
+
+/// Number of ns to spin for before sleeping a thread
+extern const u32 SPIN_TIME_NS;
 
 // --------------------------------------------------------------------------------------
 //  ThreadHandle

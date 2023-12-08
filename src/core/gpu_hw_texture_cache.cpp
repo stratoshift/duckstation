@@ -517,6 +517,7 @@ static std::unique_ptr<GPUTexture> s_replacement_texture_render_target;
 static std::unique_ptr<GPUPipeline> s_replacement_draw_pipeline;                 // copies alpha as-is
 static std::unique_ptr<GPUPipeline> s_replacement_semitransparent_draw_pipeline; // inverts alpha (i.e. semitransparent)
 
+static GPU_HW* s_hw_backend = nullptr;// TODO:FIXME: remove me
 static bool s_track_vram_writes = false;
 
 static std::string s_game_id;
@@ -551,8 +552,10 @@ bool GPUTextureCache::IsDumpingVRAMWriteTextures()
   return (g_settings.texture_replacements.dump_textures && !s_config.dump_texture_pages);
 }
 
-bool GPUTextureCache::Initialize()
+bool GPUTextureCache::Initialize(GPU_HW* backend)
 {
+  s_hw_backend = backend;
+
   LoadLocalConfiguration(false, false);
   UpdateVRAMTrackingState();
   if (!CompilePipelines())
@@ -727,6 +730,7 @@ void GPUTextureCache::Shutdown()
   s_replacement_texture_render_target.reset();
   s_hash_cache_purge_list = {};
   s_temp_vram_write_list = {};
+  s_hw_backend = nullptr;
   s_track_vram_writes = false;
 
   s_replacement_image_cache.clear();
@@ -3295,5 +3299,5 @@ void GPUTextureCache::ApplyTextureReplacements(SourceKey key, HashType tex_hash,
   g_gpu_device->RecycleTexture(std::move(entry->texture));
   entry->texture = std::move(replacement_tex);
 
-  g_gpu->RestoreDeviceContext();
+  s_hw_backend->RestoreDeviceContext();
 }

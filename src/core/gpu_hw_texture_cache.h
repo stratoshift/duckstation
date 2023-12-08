@@ -10,6 +10,7 @@ class RGBA8Image;
 class StateWrapper;
 
 struct Settings;
+class GPU_HW;
 
 //////////////////////////////////////////////////////////////////////////
 // Texture Cache
@@ -102,7 +103,7 @@ struct Source
   TListNode<Source> hash_cache_ref;
 };
 
-bool Initialize();
+bool Initialize(GPU_HW* backend);
 void UpdateSettings(const Settings& old_settings);
 bool DoState(StateWrapper& sw, bool skip);
 void Shutdown();

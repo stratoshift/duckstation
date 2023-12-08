@@ -223,10 +223,8 @@ float GetMaximumFrameTime();
 float GetThrottleFrequency();
 float GetCPUThreadUsage();
 float GetCPUThreadAverageTime();
-float GetSWThreadUsage();
-float GetSWThreadAverageTime();
-float GetGPUUsage();
-float GetGPUAverageTime();
+float GetGPUThreadUsage();
+float GetGPUThreadAverageTime();
 const FrameTimeHistory& GetFrameTimeHistory();
 u32 GetFrameTimeHistoryPos();
 void FormatLatencyStats(SmallStringBase& str);
@@ -273,6 +271,8 @@ bool IsRunningAtNonStandardSpeed();
 
 /// Adjusts the throttle frequency, i.e. how many times we should sleep per second.
 void SetThrottleFrequency(float frequency);
+
+void GetFramePresentationDetails(bool* present_frame, bool* allow_present_skip, u64* present_time);
 
 // Access controllers for simulating input.
 Controller* GetController(u32 slot);
@@ -442,10 +442,6 @@ void RequestDisplaySize(float scale = 0.0f);
 
 /// Call when host display size changes, use with "match display" aspect ratio setting.
 void HostDisplayResized();
-
-/// Renders the display.
-bool PresentDisplay(bool explicit_present, u64 present_time);
-void InvalidateDisplay();
 
 //////////////////////////////////////////////////////////////////////////
 // Memory Save States (Rewind and Runahead)
